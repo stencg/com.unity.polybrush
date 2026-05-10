@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-06-14
+
+### Features
+
+- Added an Align to Normal option for prefab scattering, allowing placed prefabs to either align to surface normals or remain vertical.
+
+### Changes
+
+- Reworked prefab brush raycasting to use a lightweight physics-based path, avoiding unnecessary PolybrushMesh components on prefab brush targets.
+- Improved brush target selection so mesh-editing tools stay restricted to selected paintable objects while preserving deselected paint targets during painting.
+- Improved brush repaint behavior for lightweight prefab mode and added platform-appropriate Command-key modifier support on macOS.
+- Removed obsolete debug UI/code from texture and Polybrush editor paths.
+
+### Bug fixes
+
+- Fixed paint brush target cleanup when secondary brush targets exit without entering.
+- Fixed a Unity 6.3 KeyNotFoundException when paint undo begins before vertex color cache data is available.
+- Fixed prefab removal and overlap checks to handle destroyed or missing prefab instances safely.
+
 ## [1.2.1] - 2025-10-31
 
 - [POLBR-28] Fixed an issue with compute-based raycasting and compute-based vertex color lerping that would write to VRAM outside the bounds of the destination stuctured buffer, which would lead to VRAM corruption, incorrect mesh rendering, and other graphical issues on Metal.

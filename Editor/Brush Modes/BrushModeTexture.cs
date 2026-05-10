@@ -1,6 +1,4 @@
-﻿// #define POLYBRUSH_DEBUG
-
-using UnityEngine;
+﻿using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine.Polybrush;
@@ -337,43 +335,6 @@ namespace UnityEditor.Polybrush
                     SplatWeightEditor.OnInspectorGUI(selectedAttributeIndex, ref brushColor, meshAttributes);
                 if (prevSelectedAttributeIndex != selectedAttributeIndex)
                     SetBrushColorWithAttributeIndex(selectedAttributeIndex);
-
-#if POLYBRUSH_DEBUG
-				GUILayout.BeginHorizontal();
-
-				GUILayout.FlexibleSpace();
-
-				if(GUILayout.Button("MetaData", EditorStyles.miniButton))
-				{
-					Debug.Log(meshAttributes.ToString("\n"));
-
-					string str = EditorUtility.FindPolybrushMetaDataForShader(meshAttributesContainer.shader);
-
-					if(!string.IsNullOrEmpty(str))
-					{
-						TextAsset asset = AssetDatabase.LoadAssetAtPath<TextAsset>(str);
-
-						if(asset != null)
-							EditorGUIUtility.PingObject(asset);
-						else
-							Debug.LogWarning("No MetaData found for Shader \"" + meshAttributesContainer.shader.name + "\"");
-					}
-					else
-					{
-						Debug.LogWarning("No MetaData found for Shader \"" + meshAttributesContainer.shader.name + "\"");
-					}
-				}
-
-				GUILayout.EndHorizontal();
-
-				GUILayout.Space(4);
-
-				if(GUILayout.Button("rebuild  targets"))
-					RebuildColorTargets(brushColor, brushSettings.strength);
-
-
-				GUILayout.Label(brushColor != null ? brushColor.ToString() : "brush color: null\n");
-#endif
             }
             else
             {

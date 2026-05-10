@@ -42,6 +42,12 @@ namespace UnityEditor.Polybrush
         [UserSetting]
         static Pref<bool> s_AvoidOverlappingGameObjects = new Pref<bool>("Scattering.AvoidOverlappingObjects", false, SettingsScope.Project);
         /// <summary>
+        /// Set to true to align prefabs to the mesh normal.
+        /// Set to false to keep prefabs vertical (no rotation to surface normal).
+        /// </summary>
+        [UserSetting]
+        static Pref<bool> s_AlignToNormal = new Pref<bool>("Scattering.AlignToNormal", true, SettingsScope.Project);
+        /// <summary>
         /// Set the size of previews in the loadout and prefab palette.
         /// </summary>
         [UserSetting]
@@ -79,6 +85,7 @@ namespace UnityEditor.Polybrush
 		GUIContent m_GCUsePrefabPivot = new GUIContent("Use Pivot", "By default Polybrush will position placed objects entirely on top of the target plane.  When 'Use Pivot' is enabled objects will instead be placed by their assigned mesh origin.");
 		GUIContent m_GCHitSurfaceIsParent = new GUIContent("Hit Surface is Parent", "When enabled any instantiated prefab from this mode will be automatically made a child of the surface it was placed on.");
 		GUIContent m_GCAvoidOverlappingGameObjects = new GUIContent("Avoid Overlap", "If enabled Polybrush will attempt to avoid placing prefabs where they may overlap with another placed GameObject.");
+		GUIContent m_GCAlignToNormal = new GUIContent("Align to Normal", "When enabled, prefabs will be rotated to align with the surface normal. When disabled, prefabs will remain vertical.");
         GUIContent m_GC2DPaintingDepth = new GUIContent("2D Depth Offset", "Define the distance to paint from the surface, use it to paint in different 2D layers and facilitate Z-sorting.");
 
 		static string FormatInstanceName(GameObject go)
@@ -119,6 +126,7 @@ namespace UnityEditor.Polybrush
 
             /// Interface
             s_UsePivotForPlacement.value = PolyGUILayout.Toggle(m_GCUsePrefabPivot, s_UsePivotForPlacement);
+			s_AlignToNormal.value = PolyGUILayout.Toggle(m_GCAlignToNormal, s_AlignToNormal);
 
 			s_ParentObjectWithSurface.value = PolyGUILayout.Toggle(m_GCHitSurfaceIsParent, s_ParentObjectWithSurface);
 			s_AvoidOverlappingGameObjects.value = PolyGUILayout.Toggle(m_GCAvoidOverlappingGameObjects, s_AvoidOverlappingGameObjects);
@@ -197,7 +205,8 @@ namespace UnityEditor.Polybrush
 		internal override void OnBrushBeginApply(BrushTarget target, BrushSettings settings)
 		{
 			base.OnBrushBeginApply(target, settings);
-			m_PrefabsInstances = PolySceneUtility.FindInstancesInScene(prefabPalette.prefabs.Select(x => x.gameObject), FormatInstanceName).ToList();
+			if (m_PrefabsInstances == null)
+				m_PrefabsInstances = PolySceneUtility.FindInstancesInScene(prefabPalette.prefabs.Select(x => x.gameObject), FormatInstanceName).ToList();
 		}
 
 		// Called every time the brush should apply itself to a valid target.  Default is on mouse move.
@@ -236,15 +245,29 @@ namespace UnityEditor.Polybrush
 
             GameObject prefab = prefabAndSettings.gameObject;
 
-            var worldPosition = target.transform.TransformPoint(hit.position);
-            var worldNormal = target.transform.TransformDirection(hit.normal);
+            // Hit is already in world space (provided by PolybrushEditor.DoPhysicsRaycast).
+            var worldPosition = hit.position;
+            var worldNormal = hit.normal;
             Ray ray = RandomRay(worldPosition, worldNormal, settings.radius, settings.falloff, settings.falloffCurve);
 
-            ray.origin = target.transform.InverseTransformPoint(ray.origin);
-            ray.direction = target.transform.InverseTransformDirection(ray.direction);
+            // Use Physics.Raycast against the target's collider(s) instead of PolyMesh raycasting.
+            // This avoids initializing PolybrushMesh on the target GameObject.
+            PolyRaycastHit rand_hit = null;
+            GameObject targetGO = target.gameObject;
+            RaycastHit[] physicsHits = Physics.RaycastAll(ray, Mathf.Infinity);
+            for (int i = 0; i < physicsHits.Length; i++)
+            {
+                Collider col = physicsHits[i].collider;
+                if (col == null)
+                    continue;
+                if (col.gameObject != targetGO && !col.transform.IsChildOf(targetGO.transform))
+                    continue;
 
-			PolyRaycastHit rand_hit;
-            if( PolySceneUtility.MeshRaycast(ray, target.editableObject.editMesh, out rand_hit) )
+                rand_hit = new PolyRaycastHit(physicsHits[i].distance, physicsHits[i].point, physicsHits[i].normal, physicsHits[i].triangleIndex);
+                break;
+            }
+
+            if (rand_hit != null)
 			{
                 PlacementSettings placementSettings = prefabAndSettings.settings;
                 Vector3 scaleSetting = prefab.transform.localScale;
@@ -271,12 +294,18 @@ namespace UnityEditor.Polybrush
                 if (placementSettings.zRotationBool)
                     rotationSetting.z = Random.Range(placementSettings.rotationRangeMin.z, placementSettings.rotationRangeMax.z);
 
-				Quaternion rotation = SceneView.lastActiveSceneView.in2DMode ?
-                                        Quaternion.FromToRotation(-Vector3.forward, target.transform.TransformDirection(rand_hit.normal)):
-                                        Quaternion.FromToRotation(Vector3.up, target.transform.TransformDirection(rand_hit.normal));
+				Quaternion rotation = Quaternion.identity;
+				if (s_AlignToNormal)
+				{
+                    // rand_hit.normal is world-space (Physics.Raycast).
+					rotation = SceneView.lastActiveSceneView.in2DMode ?
+                                            Quaternion.FromToRotation(-Vector3.forward, rand_hit.normal):
+                                            Quaternion.FromToRotation(Vector3.up, rand_hit.normal);
+				}
 
                 GameObject inst = (GameObject) PrefabUtility.InstantiatePrefab(prefab);
-                inst.transform.position = target.transform.TransformPoint(rand_hit.position);
+                // rand_hit.position is world-space (Physics.Raycast).
+                inst.transform.position = rand_hit.position;
                 inst.transform.rotation = rotation;
                 inst.transform.localScale = scaleSetting;
 
@@ -307,27 +336,35 @@ namespace UnityEditor.Polybrush
 
 		void RemoveGameObjects(PolyRaycastHit hit, BrushTarget target, BrushSettings settings)
 		{
-			Vector3 worldHitPosition = target.editableObject.transform.TransformPoint(hit.position);
+			if (m_PrefabsInstances == null)
+				return;
 
-			int count = m_PrefabsInstances.Count;
+            // hit.position is world-space (Physics.Raycast).
+            Vector3 worldHitPosition = hit.position;
 
-			for(int i = 0; i < count; i++)
+			for(int i = m_PrefabsInstances.Count - 1; i >= 0; i--)
 			{
+				GameObject instance = m_PrefabsInstances[i];
+
+				if (instance == null)
+				{
+					m_PrefabsInstances.RemoveAt(i);
+					continue;
+				}
+
                 // Skip the object if prefab is not part of the current loadout.
-                if (!prefabLoadoutEditor.ContainsPrefabInstance(m_PrefabsInstances[i]))
+                if (!prefabLoadoutEditor.ContainsPrefabInstance(instance))
                     continue;
 
-				float pivotOffset = s_UsePivotForPlacement ? 0f : GetPivotOffset(m_PrefabsInstances[i]);
-                float prefabDistance = SceneView.lastActiveSceneView.in2DMode
-                    ? Vector2.Distance(worldHitPosition, m_PrefabsInstances[i].transform.position + (pivotOffset * m_PrefabsInstances[i].transform.up))
-                    : Vector3.Distance(worldHitPosition, m_PrefabsInstances[i].transform.position + (pivotOffset * m_PrefabsInstances[i].transform.up));
+				float pivotOffset = s_UsePivotForPlacement ? 0f : GetPivotOffset(instance);
+				float prefabDistance = SceneView.lastActiveSceneView.in2DMode
+					? Vector2.Distance(worldHitPosition, instance.transform.position + (pivotOffset * instance.transform.up))
+					: Vector3.Distance(worldHitPosition, instance.transform.position + (pivotOffset * instance.transform.up));
 
-                if ( m_PrefabsInstances[i] != null &&  prefabDistance < settings.radius )
+                if ( prefabDistance < settings.radius )
                 {
-                    GameObject go = m_PrefabsInstances[i];
 					m_PrefabsInstances.RemoveAt(i);
-					count--;
-					Undo.DestroyObjectImmediate(go);
+					Undo.DestroyObjectImmediate(instance);
 				}
 			}
 		}
@@ -408,7 +445,7 @@ namespace UnityEditor.Polybrush
 
 			for(int i = 0; i < c; i++)
 			{
-				if(BoundsUtility.GetSphereBounds(m_PrefabsInstances[i], out it_bounds) && bounds.Intersects(it_bounds))
+				if(m_PrefabsInstances[i] != null && BoundsUtility.GetSphereBounds(m_PrefabsInstances[i], out it_bounds) && bounds.Intersects(it_bounds))
 					return true;
 			}
 
@@ -420,6 +457,7 @@ namespace UnityEditor.Polybrush
             prefabPalette = palette;
             prefabLoadoutEditor.ChangePalette(palette);
             RefreshAvailablePalettes();
+            m_PrefabsInstances = null;
         }
 
         void RefreshAvailablePalettes()
@@ -456,27 +494,5 @@ namespace UnityEditor.Polybrush
                 prefabLoadoutEditor.RefreshPalettesList(m_AvailablePalettes.ToList());
             }
         }
-
-#if POLYBRUSH_DEBUG
-        internal override void DrawGizmos(BrushTarget target, BrushSettings settings)
-        {
-            base.DrawGizmos(target, settings);
-
-            if (m_PrefabsInstances == null)
-                return;
-
-            SphereBounds bounds;
-
-            foreach (GameObject go in m_PrefabsInstances)
-            {
-                if (!GetSphereBounds(go, out bounds))
-                    continue;
-
-                Handles.CircleCap(-1, bounds.position, Quaternion.Euler(Vector3.up * 90f), bounds.radius);
-                Handles.CircleCap(-1, bounds.position, Quaternion.Euler(Vector3.right * 90f), bounds.radius);
-                Handles.CircleCap(-1, bounds.position, Quaternion.Euler(Vector3.forward * 90f), bounds.radius);
-            }
-        }
-#endif
     }
 }

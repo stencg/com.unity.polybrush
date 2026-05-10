@@ -200,6 +200,9 @@ namespace UnityEditor.Polybrush
 		{
 			get
 			{
+                if (isLightweight)
+                    return gameObjectAttached != null && originalMesh != null;
+
 				if(gameObjectAttached == null || graphicsMesh == null)
 					return false;
 
@@ -242,6 +245,25 @@ namespace UnityEditor.Polybrush
 
             return new EditableObject(go);
 		}
+
+        /// <summary>
+        /// Lightweight constructor for read-only brushes (e.g. prefab scattering)
+        /// that do not modify the mesh and only require world-space raycasting.
+        /// Does NOT add the PolybrushMesh component to the target GameObject,
+        /// avoiding scene bloat from auto-serialized PolyMesh data.
+        /// </summary>
+        internal static EditableObject CreateLightweight(GameObject go)
+        {
+            if (go == null)
+                return null;
+
+            return new EditableObject(go, lightweight: true);
+        }
+
+        // True when this EditableObject was created in lightweight mode and has no
+        // PolybrushMesh / editMesh / graphicsMesh attached. Only gameObjectAttached
+        // is guaranteed to be valid.
+        internal bool isLightweight { get; private set; }
 
         private void Initialize(GameObject go)
         {
@@ -333,6 +355,26 @@ namespace UnityEditor.Polybrush
             Initialize(go);
 		}
 
+        /// <summary>
+        /// Lightweight constructor.
+        /// Skips mesh duplication and PolybrushMesh component addition.
+        /// </summary>
+        private EditableObject(GameObject go, bool lightweight)
+        {
+            isLightweight = lightweight;
+            if (lightweight)
+            {
+                gameObjectAttached = go;
+                meshFilter = go.GetComponent<MeshFilter>();
+                originalMesh = go.GetMesh();
+                source = ModelSource.Scene;
+            }
+            else
+            {
+                Initialize(go);
+            }
+        }
+
         ~EditableObject()
 		{
             // clean up the composite mesh (if required)
@@ -351,6 +393,10 @@ namespace UnityEditor.Polybrush
         /// otpimziations etc) </param>
         internal void Apply(bool rebuildMesh, bool optimize = false)
         {
+            // Lightweight mode never mutates the target mesh.
+            if (isLightweight)
+                return;
+
             if (m_PolybrushMesh.mode == PolybrushMesh.Mode.AdditionalVertexStream)
             {
                 if (PolybrushEditor.instance.tool == BrushTool.RaiseLower ||
@@ -467,6 +513,10 @@ namespace UnityEditor.Polybrush
         /// </summary>
         internal void Revert()
 		{
+            // Lightweight mode never mutates the target mesh; nothing to revert.
+            if (isLightweight)
+                return;
+
             if (isProBuilderObject)
                 Apply(true, true);
 
@@ -569,6 +619,10 @@ namespace UnityEditor.Polybrush
 
         internal void RemovePolybrushComponentsIfNecessary()
         {
+            // Lightweight EditableObject never adds a PolybrushMesh component.
+            if (isLightweight || m_PolybrushMesh == null)
+                return;
+
             if (isProBuilderObject)
             {
                 GameObject.DestroyImmediate(m_PolybrushMesh);
@@ -585,6 +639,10 @@ namespace UnityEditor.Polybrush
 
         internal void ClearMeshBuffers()
         {
+            // Lightweight EditableObject has no edit/visual mesh buffers to clear.
+            if (isLightweight)
+                return;
+
             visualMesh.ClearBuffers();
             _editMesh.ClearBuffers();
         }

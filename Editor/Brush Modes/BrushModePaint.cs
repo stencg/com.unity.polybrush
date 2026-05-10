@@ -481,7 +481,12 @@ namespace UnityEditor.Polybrush
 		{
 			base.OnBrushExit(target);
 
-            var data = m_EditableObjectsData[target];
+            // A target can be exited without ever having been entered (e.g. a secondary
+            // brush target added while the hovered target didn't change, so OnBrushEnter
+            // was skipped). Mirror the guard used in OnBrushMove to avoid a KeyNotFoundException.
+            EditableObjectData data;
+            if(!m_EditableObjectsData.TryGetValue(target, out data))
+                return;
 
             if(target.editMesh != null)
             {
@@ -500,7 +505,11 @@ namespace UnityEditor.Polybrush
 		// Called every time the brush should apply itself to a valid target.  Default is on mouse move.
 		internal override void OnBrushApply(BrushTarget target, BrushSettings settings)
         {
-            var vertexColorInfo = m_EditableObjectsData[target.editableObject].MeshVertexColors;
+            EditableObjectData data;
+            if(!TryGetOrCreateEditableObjectData(target, settings, out data))
+                return;
+
+            var vertexColorInfo = data.MeshVertexColors;
             vertexColorInfo.ApplyColors();
 			target.editableObject.editMesh.colors = vertexColorInfo.OriginalColors;
             target.editableObject.modifiedChannels |= MeshChannel.Color;
@@ -514,11 +523,30 @@ namespace UnityEditor.Polybrush
         /// <param name="brushTarget">Target object of the brush</param>
         internal override void RegisterUndo(BrushTarget brushTarget)
 		{
-			brushTarget.editableObject.editMesh.colors = m_EditableObjectsData[brushTarget.editableObject].MeshVertexColors.OriginalColors;
+			EditableObjectData data;
+			if(!TryGetOrCreateEditableObjectData(brushTarget, PolybrushEditor.instance.brushSettings, out data))
+				return;
+
+			brushTarget.editableObject.editMesh.colors = data.MeshVertexColors.OriginalColors;
 			brushTarget.editableObject.ApplyMeshAttributes(MeshChannel.Color);
 
 			base.RegisterUndo(brushTarget);
 		}
+
+        bool TryGetOrCreateEditableObjectData(BrushTarget brushTarget, BrushSettings settings, out EditableObjectData data)
+        {
+            data = null;
+
+            if(!Util.IsValid(brushTarget) || brushTarget.editableObject == null || settings == null)
+                return false;
+
+            EditableObject editableObject = brushTarget.editableObject;
+            if(m_EditableObjectsData.TryGetValue(editableObject, out data))
+                return true;
+
+            OnBrushEnter(editableObject, settings);
+            return m_EditableObjectsData.TryGetValue(editableObject, out data);
+        }
 
 		internal override void DrawGizmos(BrushTarget target, BrushSettings settings)
 		{

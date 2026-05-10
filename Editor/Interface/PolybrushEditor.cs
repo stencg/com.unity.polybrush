@@ -1,6 +1,4 @@
-﻿//#define POLYBRUSH_DEBUG
-
-using UnityEngine;
+﻿using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine.Polybrush;
@@ -28,6 +26,15 @@ namespace UnityEditor.Polybrush
         static readonly Vector2 k_EditorWindowMinimumSize = new Vector2(320, 180);
 
         static List<Ray> s_Rays = new List<Ray>();
+
+        /// <summary>
+        /// Get the platform-appropriate control modifier key.
+        /// On macOS, uses Command key; on other platforms, uses Control key.
+        /// </summary>
+        static bool GetControlModifier()
+        {
+            return Application.platform == RuntimePlatform.OSXEditor ? Event.current.command : Event.current.control;
+        }
 
         /// <summary>
         /// Set true to have Polybrush window in floating mode (no dockable).
@@ -58,6 +65,12 @@ namespace UnityEditor.Polybrush
 #endif
         // All objects that have been hovered by the mouse
         Dictionary<GameObject, BrushTarget> m_Hovering = new Dictionary<GameObject, BrushTarget>();
+
+        // Persistent cache of the objects the user is allowed to paint on.
+        // Selecting one or more objects replaces this cache; deselecting everything
+        // keeps it so the user can keep painting on the objects that were selected.
+        // The cache is cleared when switching tool or closing the Polybrush window.
+        List<GameObject> m_PaintableObjects = new List<GameObject>();
         GameObject m_LastHoveredGameObject = null;
         int m_CurrentBrushIndex = 0;
         BrushSettings[] m_AvailableBrushes = null;
@@ -213,6 +226,9 @@ namespace UnityEditor.Polybrush
 			OnBrushExit( m_LastHoveredGameObject );
 			FinalizeAndResetHovering();
 
+            // Clear the persistent paintable cache when the window closes.
+            m_PaintableObjects.Clear();
+
             PreviewsDatabase.UnloadCache();
         }
 
@@ -236,7 +252,17 @@ namespace UnityEditor.Polybrush
 		internal static void DoRepaint()
 		{
 			if(PolybrushEditor.instance != null)
+			{
 				PolybrushEditor.instance.m_WantsRepaint = true;
+				// Schedule an OnGUI on the Polybrush window so the m_WantsRepaint flag is
+				// consumed promptly. Previously, scene mutations performed during
+				// EditableObject initialization (Undo.AddComponent<PolybrushMesh>, etc.)
+				// indirectly triggered this OnGUI; in lightweight (prefab) mode no such
+				// mutations happen, so the brush gizmo would only update on the next
+				// unrelated SceneView refresh. Repainting the window here fixes that
+				// without requiring "Always Refresh".
+				PolybrushEditor.instance.Repaint();
+			}
 		}
 
         void OnGUI()
@@ -266,28 +292,6 @@ namespace UnityEditor.Polybrush
 
                 EditorGUILayout.EndScrollView();
             }
-
-#if POLYBRUSH_DEBUG
-			GUILayout.Label("DEBUG", EditorStyles.boldLabel);
-
-            GUILayout.Label("target: " + (Util.IsValid(brushTarget) ? brushTarget.editableObject.gameObjectAttached.name : "null"));
-			GUILayout.Label("vertex: " + (Util.IsValid(brushTarget) ? brushTarget.editableObject.vertexCount : 0));
-			GUILayout.Label("applying: " + m_ApplyingBrush);
-			GUILayout.Label("lockBrushToFirst: " + s_LockBrushToFirst);
-			GUILayout.Label("lastHoveredGameObject: " + m_LastHoveredGameObject);
-
-			GUILayout.Space(6);
-
-			foreach(var kvp in m_Hovering)
-			{
-				BrushTarget t = kvp.Value;
-				EditableObject dbg_editable = t.editableObject;
-				GUILayout.Label("Vertex Streams: " + dbg_editable.usingVertexStreams);
-				GUILayout.Label("Original: " + (dbg_editable.originalMesh == null ? "null" : dbg_editable.originalMesh.name));
-				GUILayout.Label("Active: " + (dbg_editable.editMesh == null ? "null" : dbg_editable.editMesh.name));
-				GUILayout.Label("Graphics: " + (dbg_editable.graphicsMesh == null ? "null" : dbg_editable.graphicsMesh.name));
-			}
-#endif
 
 			if(m_WantsRepaint)
 			{
@@ -455,6 +459,12 @@ namespace UnityEditor.Polybrush
 				mode.OnEnable();
 			}
 
+			// Reset the persistent paintable cache when switching tool, then seed it with
+			// the current selection so the user can immediately paint already-selected objects.
+			m_PaintableObjects.Clear();
+			if(tool != BrushTool.None)
+				m_PaintableObjects.AddRange(Selection.gameObjects);
+
             EnsureBrushSettingsListIsValid();
 			DoRepaint();
 		}
@@ -591,7 +601,7 @@ namespace UnityEditor.Polybrush
 					if( EditorApplication.timeSinceStartup - m_LastBrushUpdate > GetTargetFramerate(brushTarget) )
 					{
 						m_LastBrushUpdate = EditorApplication.timeSinceStartup;
-						UpdateBrush(e.mousePosition, Event.current.control, Event.current.shift && Event.current.type != EventType.ScrollWheel);
+						UpdateBrush(e.mousePosition, GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel);
 					}
 					break;
 
@@ -604,24 +614,35 @@ namespace UnityEditor.Polybrush
 					if (EditorApplication.timeSinceStartup - m_LastBrushUpdate > GetTargetFramerate(brushTarget))
 					{
 						m_LastBrushUpdate = EditorApplication.timeSinceStartup;
-						UpdateBrush(e.mousePosition, Event.current.control, Event.current.shift && Event.current.type != EventType.ScrollWheel);
+						UpdateBrush(e.mousePosition, GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel);
                         // https://jira.unity3d.com/browse/POLBR-3
                         // Not checking for active view tool as it's not switched yet when MouseDown is processed here
 
                         if (e.type == EventType.MouseDown)
                         {
+                            
                             if (GUIUtility.hotControl == 0
                                 && HandleUtility.nearestControl == controlID
                                 && e.button == 0
-                                && ApplyBrush(Event.current.control, Event.current.shift && Event.current.type != EventType.ScrollWheel))
+                                && ApplyBrush(GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel))
                             {
                                 GUIUtility.hotControl = controlID;
                             }
                         }
                         else
                         {
-                            if (GUIUtility.hotControl == controlID && e.button == 0)
-                                ApplyBrush(Event.current.control, Event.current.shift && Event.current.type != EventType.ScrollWheel);
+                            if (e.button == 0)
+                            {
+                                if (GUIUtility.hotControl == controlID)
+                                {
+                                    ApplyBrush(GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel);
+                                }
+                                else if (GUIUtility.hotControl == 0 && HandleUtility.nearestControl == controlID)
+                                {
+                                    if (ApplyBrush(GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel))
+                                        GUIUtility.hotControl = controlID;
+                                }
+                            }
                         }
                     }
                     break;
@@ -630,7 +651,7 @@ namespace UnityEditor.Polybrush
 					if(m_ApplyingBrush)
 					{
 						OnFinishApplyingBrush();
-                        UpdateBrush(e.mousePosition, Event.current.control, Event.current.shift && Event.current.type != EventType.ScrollWheel);
+                        UpdateBrush(e.mousePosition, GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel);
                         if (GUIUtility.hotControl == controlID)
                             GUIUtility.hotControl = 0;
                     }
@@ -646,7 +667,7 @@ namespace UnityEditor.Polybrush
                         ((e.keyCode == KeyCode.LeftShift || e.keyCode == KeyCode.RightShift) && !brushSettings.isUserHoldingShift))
                     {
                         m_LastBrushUpdate = EditorApplication.timeSinceStartup;
-                        UpdateBrush(e.mousePosition, Event.current.control, Event.current.shift && Event.current.type != EventType.ScrollWheel);
+                        UpdateBrush(e.mousePosition, GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel);
                     }
                     break;
                 case EventType.KeyUp:
@@ -655,7 +676,7 @@ namespace UnityEditor.Polybrush
                         (e.keyCode == KeyCode.LeftShift || e.keyCode == KeyCode.RightShift))
                     {
                         m_LastBrushUpdate = EditorApplication.timeSinceStartup;
-                        UpdateBrush(e.mousePosition, Event.current.control, Event.current.shift && Event.current.type != EventType.ScrollWheel);
+                        UpdateBrush(e.mousePosition, GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel);
                     }
                     break;
 
@@ -686,6 +707,17 @@ namespace UnityEditor.Polybrush
 		}
 
         /// <summary>
+        /// True for mesh-editing tools that attach a PolybrushMesh component and must
+        /// therefore be restricted to the cached (selected) objects. The Prefab tool is
+        /// excluded because it uses a lightweight, read-only path that never attaches a
+        /// PolybrushMesh.
+        /// </summary>
+        bool RestrictToPaintableObjects
+        {
+            get { return tool != BrushTool.None && tool != BrushTool.Prefab; }
+        }
+
+        /// <summary>
         /// Get a EditableObject matching the GameObject go or create a new one.
         /// </summary>
         /// <param name="go">Gameobject to edit</param>
@@ -694,14 +726,25 @@ namespace UnityEditor.Polybrush
 		{
 			BrushTarget target = null;
 
+			// For mesh-editing tools, never create a target (and therefore never attach a
+			// PolybrushMesh) on objects that are not part of the cached selection.
+			if (RestrictToPaintableObjects && !m_PaintableObjects.Contains(go))
+				return null;
+
+			// Prefab scattering only needs world-space raycasting, so create a lightweight
+			// EditableObject that does NOT add the PolybrushMesh component (avoids scene bloat).
+			bool prefabMode = tool == BrushTool.Prefab;
+
 			if( !m_Hovering.TryGetValue(go, out target) )
 			{
-                target = new BrushTarget(EditableObject.Create(go));
+                EditableObject eo = prefabMode ? EditableObject.CreateLightweight(go) : EditableObject.Create(go);
+                target = new BrushTarget(eo);
                 m_Hovering.Add(go, target);
 			}
 			else if( !target.IsValid() )
 			{
-                m_Hovering[go] = new BrushTarget(EditableObject.Create(go));
+                EditableObject eo = prefabMode ? EditableObject.CreateLightweight(go) : EditableObject.Create(go);
+                m_Hovering[go] = new BrushTarget(eo);
 			}
 
 			return target;
@@ -739,9 +782,16 @@ namespace UnityEditor.Polybrush
 
 #if UNITY_2021_1_OR_NEWER
             int materialIndex;
-            cur = HandleUtility.PickGameObject(mousePosition, false, null,  Selection.gameObjects, out materialIndex);
-            if(cur != null)
-                brushTarget = GetOrCreateBrushTarget(cur);
+            // Mesh-editing tools restrict picking to the cached (selected) objects so the
+            // brush can never attach a PolybrushMesh to arbitrary objects under the cursor.
+            // When nothing has ever been selected the cache is empty and we pick nothing.
+            GameObject[] pickFilter = RestrictToPaintableObjects ? m_PaintableObjects.ToArray() : Selection.gameObjects;
+            if (!RestrictToPaintableObjects || m_PaintableObjects.Count > 0)
+            {
+                cur = HandleUtility.PickGameObject(mousePosition, false, null, pickFilter, out materialIndex);
+                if (cur != null)
+                    brushTarget = GetOrCreateBrushTarget(cur);
+            }
 
             if(brushTarget != null)
                 go = cur;
@@ -900,6 +950,11 @@ namespace UnityEditor.Polybrush
 
 			EditableObject editable = target.editableObject;
 
+			// Prefab scattering uses physics raycasting against world colliders so we can
+			// avoid initializing PolybrushMesh / editMesh on the target GameObject.
+			if (editable.isLightweight)
+				return DoPhysicsRaycast(mouseRay, target);
+
 			s_Rays.Clear();
 			s_Rays.Add(mouseRay);
 
@@ -950,36 +1005,85 @@ namespace UnityEditor.Polybrush
 
             if(hitMesh)
             {
-                Transform[] trs = Selection.GetTransforms(SelectionMode.Unfiltered);
                 var hits = target.raycastHits;
-                foreach(var selectedTransform in trs)
+                // Paint the other cached (selected) objects together with the active target.
+                // Using the persistent cache rather than the live selection means objects that
+                // were selected then deselected can still be painted as secondary targets.
+                foreach(var paintable in m_PaintableObjects)
                 {
-                    bool isValid = false;
-                    if(selectedTransform != editable.transform)
-                    {
-                        BrushTarget secondaryTarget = GetOrCreateBrushTarget(selectedTransform.gameObject);
-                        isValid = Util.IsValid(secondaryTarget);
-                        if(isValid)
-                        {
-                            m_SecondaryBrushTargets.Add(secondaryTarget);
-                            secondaryTarget.ClearRaycasts();
+                    if(paintable == null)
+                        continue;
 
-                            foreach(var hit in hits)
-                            {
-                                PolyRaycastHit secondaryHit = new PolyRaycastHit(hit.distance,
-                                secondaryTarget.transform.InverseTransformPoint(editable.transform.TransformPoint(hit.position)),
-                                hit.normal,
-                                -1);
-                                secondaryTarget.raycastHits.Add(secondaryHit);
-                            }
-                        }
-                        PolySceneUtility.CalculateWeightedVertices(secondaryTarget, brushSettings, tool, mode);
+                    Transform selectedTransform = paintable.transform;
+                    if(selectedTransform == editable.transform)
+                        continue;
+
+                    BrushTarget secondaryTarget = GetOrCreateBrushTarget(paintable);
+                    if(!Util.IsValid(secondaryTarget))
+                        continue;
+
+                    m_SecondaryBrushTargets.Add(secondaryTarget);
+                    secondaryTarget.ClearRaycasts();
+
+                    foreach(var hit in hits)
+                    {
+                        PolyRaycastHit secondaryHit = new PolyRaycastHit(hit.distance,
+                        secondaryTarget.transform.InverseTransformPoint(editable.transform.TransformPoint(hit.position)),
+                        hit.normal,
+                        -1);
+                        secondaryTarget.raycastHits.Add(secondaryHit);
                     }
+
+                    PolySceneUtility.CalculateWeightedVertices(secondaryTarget, brushSettings, tool, mode);
                 }
             }
 
             return hitMesh;
 		}
+
+        /// <summary>
+        /// Lightweight raycasting path for prefab scattering. Uses Physics.Raycast against
+        /// MeshColliders (or any colliders) in the scene instead of the mesh-data based
+        /// raycaster so the brush target does not require a PolybrushMesh component.
+        /// raycastHits are stored in WORLD space.
+        /// </summary>
+        static readonly RaycastHit[] s_PhysicsRaycastBuffer = new RaycastHit[64];
+
+        bool DoPhysicsRaycast(Ray mouseRay, BrushTarget target)
+        {
+            GameObject targetGO = target.gameObject;
+            if (targetGO == null)
+                return false;
+
+            int layerMask = 1 << targetGO.layer;
+            int hitCount = Physics.RaycastNonAlloc(mouseRay, s_PhysicsRaycastBuffer, Mathf.Infinity, layerMask);
+
+            int closestIndex = -1;
+            float closestDistance = float.PositiveInfinity;
+            for (int i = 0; i < hitCount; i++)
+            {
+                Collider col = s_PhysicsRaycastBuffer[i].collider;
+                if (col == null)
+                    continue;
+                // Accept hits on the target GameObject or any descendant collider
+                if (col.gameObject != targetGO && !col.transform.IsChildOf(targetGO.transform))
+                    continue;
+
+                float distance = s_PhysicsRaycastBuffer[i].distance;
+                if (distance < closestDistance)
+                {
+                    closestDistance = distance;
+                    closestIndex = i;
+                }
+            }
+
+            if (closestIndex < 0)
+                return false;
+
+            RaycastHit hit = s_PhysicsRaycastBuffer[closestIndex];
+            target.raycastHits.Add(new PolyRaycastHit(hit.distance, hit.point, hit.normal, hit.triangleIndex));
+            return true;
+        }
 
         /// <summary>
         /// Apply brush to current brush target
@@ -1056,7 +1160,7 @@ namespace UnityEditor.Polybrush
 
 			if(mode != null)
 			{
-				UpdateBrush(Event.current.mousePosition, Event.current.control, Event.current.shift && Event.current.type != EventType.ScrollWheel);
+				UpdateBrush(Event.current.mousePosition, GetControlModifier(), Event.current.shift && Event.current.type != EventType.ScrollWheel);
 				mode.OnBrushSettingsChanged(brushTarget, brushSettings);
 			}
 
@@ -1066,16 +1170,33 @@ namespace UnityEditor.Polybrush
 
 		void OnSelectionChanged()
 		{
-            // We want to delete deselected gameObjects from this.m_Hovering
-            var toDelete = new List<GameObject>();
             var selectionGameObjects = Selection.gameObjects;
 
-            foreach (var hovering in m_Hovering.Keys)
-                if (!selectionGameObjects.Contains(hovering))
-                    toDelete.Add(hovering);
+            m_PaintableObjects.RemoveAll(x => x == null);
 
-            foreach (var go in toDelete)
-                m_Hovering.Remove(go);
+            // Replace the persistent paintable cache only when the user actually selects
+            // something new. Deselecting everything keeps the previous cache so the user
+            // can keep painting on the objects that were selected.
+            if (selectionGameObjects.Length > 0)
+            {
+                m_PaintableObjects.Clear();
+                m_PaintableObjects.AddRange(selectionGameObjects);
+            }
+
+            // Drop hovering entries that are no longer part of the paintable cache.
+            var toDelete = new List<GameObject>();
+            if(RestrictToPaintableObjects)
+            {
+                foreach (var hovering in m_Hovering.Keys)
+                    if (hovering == null || !m_PaintableObjects.Contains(hovering))
+                        toDelete.Add(hovering);
+
+                foreach (var go in toDelete)
+                {
+                    OnBrushExit(go);
+                    m_Hovering.Remove(go);
+                }
+            }
 
 #if !UNITY_2021_1_OR_NEWER
 			m_IgnoreDrag.Clear();
